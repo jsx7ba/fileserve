@@ -4,11 +4,11 @@ import (
 	"database/sql"
 	"errors"
 	"fileserve"
+	_ "github.com/glebarez/go-sqlite"
 	"log/slog"
 	"os"
 	"path/filepath"
-
-	_ "github.com/glebarez/go-sqlite"
+	"strings"
 )
 
 var dbfile = "fileserv.db"
@@ -74,7 +74,11 @@ func createTables(db *sql.DB) error {
 func (s *SQL3FileStore) AddFile(f fileserve.FileData) (fileserve.FileMetadata, error) {
 	slog.Info("add file", "content-type", f.ContentType)
 	result, err := s.db.Exec(insertFileQuery, f.Hash, f.Size, f.Name, f.ContentType, f.Data)
+
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint") { // the file already exists in the db
+			return f.FileMetadata, nil
+		}
 		return f.FileMetadata, logISEAndError(err.Error())
 	}
 
