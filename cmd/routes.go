@@ -14,19 +14,17 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"sync"
 	"time"
 )
 
 type RouteHandler struct {
 	fileStore store.FileStore
+	pool      sync.Pool
 }
 
 func NewRoutHandler(fs store.FileStore) *RouteHandler {
-	return &RouteHandler{fileStore: fs}
-}
-
-func newBuffer() any {
-	return &bytes.Reader{}
+	return &RouteHandler{fileStore: fs, pool: sync.Pool{New: newBuffer}}
 }
 
 func (r *RouteHandler) AddFile(resp http.ResponseWriter, req *http.Request) {
@@ -37,7 +35,13 @@ func (r *RouteHandler) AddFile(resp http.ResponseWriter, req *http.Request) {
 	}
 	defer mpfile.Close()
 
-	md5Hash, content, err := r.hashContent(mpfile)
+	md5Hash, buffer, err := r.hashContent(mpfile)
+	if err != nil {
+		resp.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer r.pool.Put(buffer)
+
 	contentType := mime.TypeByExtension(path.Ext(mpfileHeader.Filename))
 
 	slog.Info("adding file", "hash", md5Hash, "filename", mpfileHeader.Filename)
@@ -48,7 +52,7 @@ func (r *RouteHandler) AddFile(resp http.ResponseWriter, req *http.Request) {
 			Size:        mpfileHeader.Size,
 			Hash:        md5Hash,
 			ContentType: contentType},
-		Data: content,
+		Data: buffer.Bytes(),
 	}
 
 	metadata, err := r.fileStore.AddFile(fd)
@@ -93,13 +97,14 @@ func (r *RouteHandler) DeleteFile(resp http.ResponseWriter, req *http.Request) {
 	processError(err, resp)
 }
 
-func (r *RouteHandler) hashContent(in io.ReadCloser) (string, []byte, error) {
-	buffer, err := io.ReadAll(in)
+func (r *RouteHandler) hashContent(in io.ReadCloser) (string, *bytes.Buffer, error) {
+	buffer := r.pool.Get().(*bytes.Buffer)
+	_, err := io.Copy(buffer, in)
 	if err != nil {
 		return "", nil, err
 	}
 
-	sum := md5.Sum(buffer)
+	sum := md5.Sum(buffer.Bytes())
 	dst := make([]byte, hex.EncodedLen(len(sum)))
 	hex.Encode(dst, sum[:])
 	return string(dst), buffer, nil
@@ -129,4 +134,8 @@ func processError(err error, resp http.ResponseWriter) bool {
 
 	resp.WriteHeader(code)
 	return true
+}
+
+func newBuffer() any {
+	return new(bytes.Buffer)
 }
